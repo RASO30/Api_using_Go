@@ -1,0 +1,185 @@
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"math/rand"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+type Employer struct {
+	Name  string `json:"Name"`
+	Email string `json:"Email"`
+	RSVP  string `json:"RSVP"`
+}
+
+type Meeting_api struct {
+	Id                string         `json:"Id"`
+	Title             string         `json:"Title"`
+	Employer      []Employer `json:"Employer"`
+	StartTime         time.Time      `json:"Start Time"`
+	EndTime           time.Time      `json:"End Time"`
+	CreationTimestamp time.Time      `json:"Creation Timestamp"`
+}
+
+type Meeting_apiScheduler struct {
+	sync.Mutex
+	store map[string]Meeting_api
+}
+
+func (h *Meeting_apiScheduler) Meeting_apis(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		h.get(w, r)
+		return
+	case "POST":
+		h.post(w, r)
+		return
+	default:
+		w.Write([]byte("method not allowed"))
+		return
+	}
+}
+
+func (h *Meeting_apiScheduler) get(w http.ResponseWriter, r *http.Request) {
+	Meeting_apis := make([]Meeting_api, len(h.store))
+
+	i := 0
+	for _, Meeting_api := range h.store {
+		Meeting_apis[i] = Meeting_api
+		i++
+	}
+	h.Unlock()
+
+	jsonBytes, err := json.Marshal(Meeting_apis)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+	}
+
+	w.Header().Add("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonBytes)
+}
+
+func (h *Meeting_apiScheduler) post(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := ioutil.ReadAll(r.Body)
+	defer r.Body.Close()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	ct := r.Header.Get("content-type")
+	if ct != "application/json" {
+		w.WriteHeader(http.StatusUnsupportedMediaType)
+		w.Write([]byte(fmt.Sprintf("need content-type 'application/json', but got '%s'", ct)))
+		return
+	}
+
+	var Meeting_api Meeting_api
+	err = json.Unmarshal(bodyBytes, &Meeting_api)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	Meeting_api.Id = fmt.Sprintf("%d", time.Now().UnixNano())
+	h.Lock()
+	h.store[Meeting_api.Id] = Meeting_api
+	defer h.Unlock()
+}
+
+func (h *Meeting_apiScheduler) getRandomMeeting_api(w http.ResponseWriter, r *http.Request) {
+	ids := make([]string, len(h.store))
+	h.Lock()
+	i := 0
+	for id := range h.store {
+		ids[i] = id
+		i++
+	}
+	defer h.Unlock()
+
+	var target string
+	if len(ids) == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	} else if len(ids) == 1 {
+		target = ids[0]
+	} else {
+		rand.Seed(time.Now().UnixNano())
+		target = ids[rand.Intn(len(ids))]
+	}
+
+	w.Header().Add("location", fmt.Sprintf("/Meeting_apis/%s", target))
+	w.WriteHeader(http.StatusFound)
+}
+
+func (h *Meeting_apiScheduler) getMeeting_api(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.String(), "/")
+	if len(parts) != 3 {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	if parts[0] == "random" {
+		h.getRandomMeeting_api(w, r)
+		return
+	}
+
+	h.Lock()
+	Meeting_api, ok := h.store[parts[0]]
+	h.Unlock()
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	jsonBytes, err := json.Marshal(Meeting_api)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+	}
+
+	w.Header().Add("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonBytes)
+}
+
+func newMeeting_apiScheduler() *Meeting_apiScheduler {
+	return &Meeting_apiScheduler{
+		store: map[string]Meeting_api{},
+	}
+}
+
+func main() {
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	defer func() {
+		if err = client.Disconnect(ctx); err != nil {
+			panic(err)
+		}
+	}()
+
+	Meeting_apiScheduler := newMeeting_apiScheduler()
+	http.HandleFunc("/Meeting_apis", Meeting_apiScheduler.post)
+    http.HandleFunc("/Meeting_api/", Meeting_apiScheduler.getMeeting_api)
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+	
+}
